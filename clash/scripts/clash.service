@@ -29,12 +29,12 @@ del_tun_link() {
 
 add_ip_rule() {
     ip rule add fwmark ${mark_id} lookup ${table_id} pref 5000
-    ip rule add from ${tun_ip} lookup ${table_id} pref 14000
+    ip rule add from ${tun_ip} to ${tun_ip} lookup ${table_id} pref 14000
 }
 
 del_ip_rule() {
     ip rule del fwmark ${mark_id} lookup ${table_id} pref 5000
-    ip rule del from ${tun_ip} lookup ${table_id} pref 14000
+    ip rule del from ${tun_ip} to ${tun_ip} lookup ${table_id} pref 14000
 }
 
 add_ip_route() {
@@ -43,7 +43,7 @@ add_ip_route() {
 }
 
 flush_ip_route() {
-    ip route flush table_id ${table_id}
+    ip route flush table ${table_id}
 }
 
 probe_clash_alive() {

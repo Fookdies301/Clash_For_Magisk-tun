@@ -5,7 +5,9 @@ proxy_mode="none"
 appid_file="/sdcard/Documents/clash/appid.list"
 sdcard_rw_uid="1015"
 mark_id="1000"
+clash_redir_port="7892"
 clash_dns_port="1053"
+tun_ip="198.18.0.0/16"
 intranet=(0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4)
 
 create_mangle_iptables() {
@@ -26,6 +28,7 @@ create_proxy_iptables() {
     iptables -t mangle -N PROXY
     iptables -t nat -N FILTER_DNS
 
+    iptables -t nat -I PREROUTING -i wlan0 -j REDIRECT --to-port ${clash_redir_port}
     iptables -t mangle -A PROXY -m owner --gid-owner ${sdcard_rw_uid} -j RETURN
 
     probe_proxy_mode
@@ -35,7 +38,7 @@ create_proxy_iptables() {
         iptables -t nat -A FILTER_DNS -j DNS
     elif [ "${proxy_mode}" = "skip" ] ; then
         for appid in ${appid_list[@]} ; do
-            iptables -t mangle -A PROXY -m owner --uid-owner ${appid} -j RETURN
+            iptables -t mangle -I PROXY -m owner --uid-owner ${appid} ! -d ${tun_ip} -j RETURN
             iptables -t nat -A FILTER_DNS -m owner --uid-owner ${appid} -j RETURN
         done
         iptables -t mangle -A PROXY -j CLASH
@@ -80,7 +83,7 @@ probe_proxy_mode() {
 
 create_dns_iptables() {
     iptables -t nat -N DNS
-    ip6tables -t filter -A OUTPUT -p udp --dport 53 -j DROP
+    # ip6tables -t filter -A OUTPUT -p udp --dport 53 -j DROP
     iptables -t nat -A DNS -m owner --gid-owner ${sdcard_rw_uid} -j RETURN
     iptables -t nat -A DNS -p tcp --dport 53 -j REDIRECT --to-port ${clash_dns_port}
     iptables -t nat -A DNS -p udp --dport 53 -j REDIRECT --to-port ${clash_dns_port}
@@ -93,7 +96,7 @@ flush_iptables() {
     iptables -t mangle -F PROXY
     iptables -t nat -F FILTER_DNS
     iptables -t nat -F DNS
-    ip6tables -t filter -D OUTPUT -p udp --dport 53 -j DROP
+    # ip6tables -t filter -D OUTPUT -p udp --dport 53 -j DROP
     iptables -t mangle -X CLASH
     iptables -t mangle -X PROXY
     iptables -t nat -X FILTER_DNS
@@ -101,7 +104,7 @@ flush_iptables() {
 }
 
 disable_proxy() {
-    flush_iptables >> /dev/null
+    flush_iptables > /dev/null
 }
 
 enable_proxy() {
