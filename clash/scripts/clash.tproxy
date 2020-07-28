@@ -1,152 +1,111 @@
 #!/system/bin/sh
 
-app_proxy_mode="none"
-appid_file="/sdcard/Documents/clash/appid.list"
-clash_redir_port="7892"
-mark_id="1000"
-sdcard_rw_id="1015"
 appid_list=()
-proxy_for_app=false
+proxy_mode="none"
+appid_file="/sdcard/Documents/clash/appid.list"
+sdcard_rw_uid="1015"
+mark_id="1000"
+clash_dns_port="1053"
 intranet=(0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4)
 
-creat_udp_mangle_iptables() {
+create_mangle_iptables() {
     iptables -t mangle -N CLASH
 
     for subnet in ${intranet[@]} ; do
         iptables -t mangle -A CLASH -d ${subnet} -j RETURN
     done
 
+    iptables -t mangle -A CLASH -p tcp ! --dport 53 -j MARK --set-xmark ${mark_id}
     iptables -t mangle -A CLASH -p udp ! --dport 53 -j MARK --set-xmark ${mark_id}
 
-    if ${proxy_for_app} ; then
-        proxy_app_udp_iptables
-    fi
+    create_dns_iptables
+    create_proxy_iptables
 }
 
-creat_tcp_nat_iptables() {
-    iptables -t nat -N CLASH
+create_proxy_iptables() {
+    iptables -t mangle -N PROXY
+    iptables -t nat -N FILTER_DNS
 
-    for subnet in ${intranet[@]} ; do
-        iptables -t nat -A CLASH -d ${subnet} -j RETURN
-    done
+    iptables -t mangle -A PROXY -m owner --gid-owner ${sdcard_rw_uid} -j RETURN
 
-    iptables -t nat -A CLASH -p tcp -j REDIRECT --to-ports ${clash_redir_port}
+    probe_proxy_mode
 
-    if ${proxy_for_app} ; then
-        proxy_app_tcp_iptables
+    if [ "${proxy_mode}" = "ALL" ] ; then
+        iptables -t mangle -A PROXY -j CLASH
+        iptables -t nat -A FILTER_DNS -j DNS
+    elif [ "${proxy_mode}" = "skip" ] ; then
+        for appid in ${appid_list[@]} ; do
+            iptables -t mangle -A PROXY -m owner --uid-owner ${appid} -j RETURN
+            iptables -t nat -A FILTER_DNS -m owner --uid-owner ${appid} -j RETURN
+        done
+        iptables -t mangle -A PROXY -j CLASH
+        iptables -t nat -A FILTER_DNS -j DNS
+    elif [ "${proxy_mode}" = "pick" ] ; then
+        for appid in ${appid_list[@]} ; do
+            iptables -t mangle -A PROXY -m owner --uid-owner ${appid} -j CLASH
+            iptables -t nat -A FILTER_DNS -m owner --uid-owner ${appid} -j DNS
+        done
     fi
+
+    iptables -t mangle -A OUTPUT -j PROXY
+    iptables -t nat -A OUTPUT -j FILTER_DNS
 }
 
-probe_clash_mode() {
-    echo "" >> "${appid_file}"
-
+probe_proxy_mode() {
+    echo "" >> ${appid_file}
     sed -i '/^$/d' "${appid_file}"
-
-    if [ -f ${appid_file} ] ; then
-        if [ "head -1 ${appid_file}" = "bypass" ] ; then
-            app_proxy_mode="skip"
+    if [ -f "${appid_file}" ] ; then
+        first_line=$(head -1 ${appid_file})
+        if [ "${first_line}" = "ALL" ] ; then
+            proxy_mode=ALL
+        elif [ "${first_line}" = "bypass" ] ; then
+            proxy_mode=skip
         else
-            app_proxy_mode="pick"
-        fi
-
-        while read appid_line ; do
-            appid_text=(`echo ${appid_line}`)
-            for appid_word in ${appid_text[*]} ; do
-                if [ "echo ${appid_word}" = "bypass" ] ; then
-                    break
-                elif [ "${appid_word}" -ge 0 ] ; then
-                    appid_list=(${appid_list[*]} ${appid_word})
-                fi
-            done
-        done < ${appid_file}
-
-        if ( [ "${app_proxy_mode}" = "skip" ] || ( [ "${app_proxy_mode}" = "pick" ] && [ "${appid_list[*]}" = "ALL" ] ) ) ; then
-            proxy_for_app=true
+            proxy_mode=pick
         fi
     fi
-}
 
-proxy_app_tcp_iptables() {
-    iptables -t nat -N APP_TCP_PROXY
-
-    iptables -t nat -A APP_TCP_PROXY -m owner --gid-owner ${sdcard_rw_id} -j RETURN
-
-    if [ "${app_proxy_mode}" = "pick" ] ; then
-        if [ "${appid_list[*]}" = "ALL" ] ; then
-            iptables -t nat -A APP_TCP_PROXY -j CLASH
-        else
-            for appid in ${appid_list[@]}; do
-                iptables -t nat -A APP_TCP_PROXY -m owner --uid-owner ${appid} -j CLASH
-            done
-        fi
-    elif [ "${app_proxy_mod}" = "skip" ] ; then
-        for appid in ${appid_list[@]} ; do
-            iptables -t nat -A APP_TCP_PROXY -m owner --uid-owner ${appid} -j RETURN
+    while read appid_line ; do
+        appid_text=(`echo ${appid_line}`)
+        for appid_word in ${appid_text[*]} ; do
+            if [ "${appid_word}" = "bypass" ] ; then
+                break
+            else
+                appid_list=(${appid_list[*]} ${appid_word})
+            fi
         done
-        iptables -t nat -A APP_TCP_PROXY -p tcp -j CLASH
-    fi
-
-    iptables -t nat -A OUTPUT -p tcp -j APP_TCP_PROXY
+    done < ${appid_file}
+    echo ${appid_list[*]}
 }
 
-proxy_app_udp_iptables() {
-    iptables -t mangle -N APP_UDP_PROXY
-
-    iptables -t mangle -A APP_UDP_PROXY -m owner --gid-owner ${sdcard_rw_id} -j RETURN
-
-    if [ "${app_proxy_mode}" = "pick" ] ; then
-        if [ "${appid_list[*]}" = "ALL" ] ; then
-            iptables -t mangle -A APP_UDP_PROXY -j CLASH
-        else
-            for appid in ${appid_list[@]}; do
-                iptables -t mangle -A APP_UDP_PROXY -m owner --uid-owner ${appid} -j CLASH
-            done
-        fi
-    elif [ "${app_proxy_mod}" = "skip" ] ; then
-        for appid in ${appid_list[@]} ; do
-            iptables -t mangle -A APP_UDP_PROXY -m owner --uid-owner ${appid} -j RETURN
-        done
-        iptables -t mangle -A APP_UDP_PROXY -p tcp -j CLASH
-    fi
-
-    iptables -t mangle -A OUTPUT -p udp -j APP_UDP_PROXY
-}
-creat_dns() {
+create_dns_iptables() {
     iptables -t nat -N DNS
-    iptables -t nat -A DNS -m owner --gid-owner sdcard_rw -j RETURN
-    iptables -t nat -A DNS -p udp --dport 53 -j REDIRECT --to-port 1053
-    iptables -t nat -A OUTPUT -p udp --dport 53 -j DNS
-}
-flush_mangle_iptables() {
-    iptables -t mangle -F OUTPUT
-    sleep 1
-    iptables -t mangle -F APP_UDP_PROXY
-    iptables -t mangle -X APP_UDP_PROXY
-    sleep 1
-    iptables -t mangle -F CLASH
-    iptables -t mangle -X CLASH
+    ip6tables -t filter -A OUTPUT -p udp --dport 53 -j DROP
+    iptables -t nat -A DNS -m owner --gid-owner ${sdcard_rw_uid} -j RETURN
+    iptables -t nat -A DNS -p tcp --dport 53 -j REDIRECT --to-port ${clash_dns_port}
+    iptables -t nat -A DNS -p udp --dport 53 -j REDIRECT --to-port ${clash_dns_port}
 }
 
-flush_nat_iptables() {
+flush_iptables() {
+    iptables -t mangle -F OUTPUT
     iptables -t nat -F OUTPUT
-    sleep 1
-    iptables -t nat -F APP_TCP_PROXY
-    iptables -t nat -X APP_TCP_PROXY
-    sleep 1
-    iptables -t nat -F CLASH
-    iptables -t nat -X CLASH
+    iptables -t mangle -F CLASH
+    iptables -t mangle -F PROXY
+    iptables -t nat -F FILTER_DNS
+    iptables -t nat -F DNS
+    ip6tables -t filter -D OUTPUT -p udp --dport 53 -j DROP
+    iptables -t mangle -X CLASH
+    iptables -t mangle -X PROXY
+    iptables -t nat -X FILTER_DNS
+    iptables -t nat -X DNS
 }
 
 disable_proxy() {
-    flush_mangle_iptables
-    flush_nat_iptables
+    flush_iptables >> /dev/null
 }
 
 enable_proxy() {
-    probe_clash_mode
-    creat_dns
-    creat_tcp_nat_iptables
-    creat_udp_mangle_iptables
+    create_mangle_iptables
 }
 
 case "$1" in
