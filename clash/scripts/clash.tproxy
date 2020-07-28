@@ -1,175 +1,153 @@
 #!/system/bin/sh
 
-# 变量
-tun_ip="198.18.0.0/16"
-mark_id="1000"
-appid_file="/sdcard/Documents/clash/appid.list"
-intranet=(0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4)
-clash_redir_port="7892"
-iptables_wait="iptables"
-inet_uid="3003"
 app_proxy_mode="none"
-clash_share=false
+appid_file="/sdcard/Documents/clash/appid.list"
+clash_redir_port="7892"
+mark_id="1000"
+sdcard_rw_id="1015"
 appid_list=()
 proxy_for_app=false
+intranet=(0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4)
 
-suit_iptables_version() {
-  iptables_version=`iptables -V | grep -o "v1\.[0-9]"`
-  if [ "${iptables_version}" = "v1.4" ] ; then
-    ## fix options for lower version iptables
-    export ANDROID_DATA=/data
-    export ANDROID_ROOT=/system
-    iptables_wait="iptables -w"
-  elif [ "${iptables_version}" = "v1.6" ] || [ "${iptables_version}" = "v1.8" ] ; then
-    iptables_wait="iptables -w 100"
-  else
-    iptables_wait="echo iptables"
-  fi
+creat_udp_mangle_iptables() {
+    iptables -t mangle -N CLASH
+
+    for subnet in ${intranet[@]} ; do
+        iptables -t mangle -A CLASH -d ${subnet} -j RETURN
+    done
+
+    iptables -t mangle -A CLASH -p udp ! --dport 53 -j MARK --set-xmark ${mark_id}
+
+    if ${proxy_for_app} ; then
+        proxy_app_udp_iptables
+    fi
 }
 
-find_netstat_path() {
-  [ -f /system/bin/netstat ] && alias netstat="/system/bin/netstat" && return 0
-  [ -f /system/xbin/netstat ] && alias netstat="/system/xbin/netstat" && return 0
-  return 1
+creat_tcp_nat_iptables() {
+    iptables -t nat -N CLASH
+
+    for subnet in ${intranet[@]} ; do
+        iptables -t nat -A CLASH -d ${subnet} -j RETURN
+    done
+
+    iptables -t nat -A CLASH -p tcp -j REDIRECT --to-ports ${clash_redir_port}
+
+    if ${proxy_for_app} ; then
+        proxy_app_tcp_iptables
+    fi
 }
 
-probe_clash_listen() {
-  find_netstat_path || return
-  clash_listen=`netstat -tnlp | grep clash | grep LISTEN`
-  if eval "echo \"${clash_listen}\" | grep -q :::${clash_redir_port}" || eval "echo \"${clash_listen}\" | grep -q 0.0.0.0:${clash_redir_port}" ; then
-    clash_share=true
-    return
-  elif eval "echo \"${clash_listen}\" | grep -q :${clash_redir_port}" ; then
-    return
-  else
-    echo "[Error]: Clash service is not listening on port ${clash_redir_port} ."
-    exit 1
-  fi
-}
-
-probe_clash_target() {
+probe_clash_mode() {
     echo "" >> "${appid_file}"
+
     sed -i '/^$/d' "${appid_file}"
 
     if [ -f ${appid_file} ] ; then
-        ## check appid_file is white-list or black-list
-        if head -1 "${appid_file}" | grep -q 'bypass' ; then
+        if [ "head -1 ${appid_file}" = "bypass" ] ; then
             app_proxy_mode="skip"
         else
             app_proxy_mode="pick"
         fi
+
         while read appid_line ; do
             appid_text=(`echo ${appid_line}`)
             for appid_word in ${appid_text[*]} ; do
-                if echo "${appid_word}" | grep -q '#' ; then
+                if [ "echo ${appid_word}" = "bypass" ] ; then
                     break
-                elif [ "${appid_word}" -ge 0 ] 2> /dev/null ; then
+                elif [ "${appid_word}" -ge 0 ] ; then
                     appid_list=(${appid_list[*]} ${appid_word})
                 fi
             done
         done < ${appid_file}
-    fi
 
-    if ( [ "${app_proxy_mode}" = "skip" ] || ( [ "${app_proxy_mode}" = "pick" ] && [ ${#appid_list[@]} -gt 0 ] ) ) ; then
-        proxy_for_app=true
+        if ( [ "${app_proxy_mode}" = "skip" ] || ( [ "${app_proxy_mode}" = "pick" ] && [ "${appid_list[*]}" = "ALL" ] ) ) ; then
+            proxy_for_app=true
+        fi
     fi
 }
 
-probe_uid_app_name() {
-  app_handle="$2"
-  if [ "$1" == "0" ] ; then
-    app_name="root"
-  else
-    app_name=`grep " $1 " /data/system/packages.list | cut -d ' ' -f 1`
-    app_name=`echo ${app_name} | sed 's/ / \& /g'`
-  fi
-  if [ "${app_name}" != "" ] ; then
-    echo "[Info]: ${app_handle} ${app_name} APP's network."
-  else
-    echo "[Warning]: APP with uid=$1 is not found."
-    return 1
-  fi
-}
+proxy_app_tcp_iptables() {
+    iptables -t nat -N APP_TCP_PROXY
 
-proxy_app_tcp_and_udp_iptables() {
-    ${iptables_wait} -t mangle -N APP_TCP_AND_UDP_PROXY
-
-    ${iptables_wait} -t mangle -A APP_TCP_AND_UDP_PROXY -m owner --gid-owner sdcard_rw -j RETURN
+    iptables -t nat -A APP_TCP_PROXY -m owner --gid-owner ${sdcard_rw_id} -j RETURN
 
     if [ "${app_proxy_mode}" = "pick" ] ; then
-        ## proxy all apps network
-        if [ "${appid_list[*]}" = "all" ] ; then
-            echo "[Info]: Proxy all APP's network."
-            ${iptables_wait} -t mangle -A APP_TCP_AND_UDP_PROXY -j CLASH
-        ## proxy assign app
+        if [ "${appid_list[*]}" = "ALL" ] ; then
+            iptables -t nat -A APP_TCP_PROXY -j CLASH
         else
             for appid in ${appid_list[@]}; do
-                probe_uid_app_name ${appid} "Proxy" && \
-                ${iptables_wait} -t mangle -A APP_TCP_AND_UDP_PROXY -m owner --uid-owner ${appid} -j CLASH
+                iptables -t nat -A APP_TCP_PROXY -m owner --uid-owner ${appid} -j CLASH
             done
         fi
-    ## black-list mode
     elif [ "${app_proxy_mod}" = "skip" ] ; then
-        for appid in ${appid_list[@]}; do
-            probe_uid_app_name ${appid} "Ignore" && \
-            ${iptables_wait} -t mangle -A APP_TCP_AND_UDP_PROXY -m owner --uid-owner ${appid} -j RETURN
+        for appid in ${appid_list[@]} ; do
+            iptables -t nat -A APP_TCP_PROXY -m owner --uid-owner ${appid} -j RETURN
         done
-        echo "[Info]: Proxy all remaining APP's network."
-        ${iptables_wait} -t mangle -A APP_TCP_AND_UDP_PROXY -m owner ! --gid-owner sdcard_rw -j CLASH
+        iptables -t nat -A APP_TCP_PROXY -p tcp -j CLASH
     fi
-    ${iptables_wait} -t mangle -A OUTPUT -j APP_TCP_AND_UDP_PROXY
+
+    iptables -t nat -A OUTPUT -p tcp -j APP_TCP_PROXY
 }
 
-create_proxy_iptables() {
-    echo "[Info]: Create proxy iptables chains."
-    ${iptables_wait} -t mangle -N  CLASH
+proxy_app_udp_iptables() {
+    iptables -t mangle -N APP_UDP_PROXY
 
-    for subnet in ${intranet[@]}; do
-        ${iptables_wait} -t mangle -A CLASH -d ${subnet} -j RETURN
-    done
+    iptables -t mangle -A APP_UDP_PROXY -m owner --gid-owner ${sdcard_rw_id} -j RETURN
 
-    ${iptables_wait} -t mangle -A CLASH -p tcp -j MARK --set-xmark ${mark_id}
-
-    ${iptables_wait} -t mangle -A CLASH -p udp -j MARK --set-xmark ${mark_id}
-
-    if ${proxy_for_app} ; then
-        proxy_app_tcp_and_udp_iptables
+    if [ "${app_proxy_mode}" = "pick" ] ; then
+        if [ "${appid_list[*]}" = "ALL" ] ; then
+            iptables -t mangle -A APP_UDP_PROXY -j CLASH
+        else
+            for appid in ${appid_list[@]}; do
+                iptables -t mangle -A APP_UDP_PROXY -m owner --uid-owner ${appid} -j CLASH
+            done
+        fi
+    elif [ "${app_proxy_mod}" = "skip" ] ; then
+        for appid in ${appid_list[@]} ; do
+            iptables -t mangle -A APP_UDP_PROXY -m owner --uid-owner ${appid} -j RETURN
+        done
+        iptables -t mangle -A APP_UDP_PROXY -p tcp -j CLASH
     fi
-}
 
+    iptables -t mangle -A OUTPUT -p udp -j APP_UDP_PROXY
+}
+creat_dns() {
+    iptables -t nat -N DNS
+    iptables -t nat -A DNS -m owner --gid-owner sdcard_rw -j RETURN
+    iptables -t nat -A DNS -p udp --dport 53 -j REDIRECT --to-port 1053
+    iptables -t nat -A OUTPUT -p udp --dport 53 -j DNS
+}
 flush_mangle_iptables() {
-    echo "[Info]: Clean mangle proxy iptables rules."
-    # iptables_chains=`iptables-save -t nat | cut -d ' ' -f 1 | tr "\n" " "`
-    # ${iptables_wait} -t mangle -D OUTPUT -j APP_TCP_AND_UDP_PROXY 2> /dev/null
-    # if eval "echo \"${iptables_chains}\" | grep -q \":APP_TCP_AND_UDP_PROXY \"" ; then
-    #     ${iptables_wait} -t mangle -F APP_TCP_AND_UDP_PROXY
-    #     ${iptables_wait} -t mangle -X APP_TCP_AND_UDP_PROXY
-    # fi
-    # if eval "echo \"${iptables_chains}\" | grep -q \":CLASH \"" ; then
-    #     ${iptables_wait} -t mangle -F CLASH
-    #     ${iptables_wait} -t mangle -X CLASH
-    # fi
-    # unset iptables_chains
-    ${iptables_wait} -t mangle -F OUTPUT
+    iptables -t mangle -F OUTPUT
     sleep 1
-    ${iptables_wait} -t mangle -F APP_TCP_AND_UDP_PROXY
-    ${iptables_wait} -t mangle -X APP_TCP_AND_UDP_PROXY
+    iptables -t mangle -F APP_UDP_PROXY
+    iptables -t mangle -X APP_UDP_PROXY
     sleep 1
-    ${iptables_wait} -t mangle -F CLASH
-    ${iptables_wait} -t mangle -X CLASH
+    iptables -t mangle -F CLASH
+    iptables -t mangle -X CLASH
+}
+
+flush_nat_iptables() {
+    iptables -t nat -F OUTPUT
+    sleep 1
+    iptables -t nat -F APP_TCP_PROXY
+    iptables -t nat -X APP_TCP_PROXY
+    sleep 1
+    iptables -t nat -F CLASH
+    iptables -t nat -X CLASH
 }
 
 disable_proxy() {
     flush_mangle_iptables
+    flush_nat_iptables
 }
 
 enable_proxy() {
-    probe_clash_listen
-    probe_clash_target
-    create_proxy_iptables
+    probe_clash_mode
+    creat_dns
+    creat_tcp_nat_iptables
+    creat_udp_mangle_iptables
 }
-
-suit_iptables_version
 
 case "$1" in
   enable)
