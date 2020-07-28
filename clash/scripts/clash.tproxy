@@ -128,8 +128,9 @@ create_proxy_iptables() {
         ${iptables_wait} -t mangle -A CLASH -d ${subnet} -j RETURN
     done
 
-    ${iptables_wait} -t mangle -A CLASH -p udp --dport 53 -j RETURN
-    ${iptables_wait} -t mangle -A CLASH -j MARK --set-xmark ${mark_id}
+    ${iptables_wait} -t mangle -A CLASH -p tcp -j MARK --set-xmark ${mark_id}
+
+    ${iptables_wait} -t mangle -A CLASH -p udp -j MARK --set-xmark ${mark_id}
 
     if ${proxy_for_app} ; then
         proxy_app_tcp_and_udp_iptables
@@ -138,17 +139,24 @@ create_proxy_iptables() {
 
 flush_mangle_iptables() {
     echo "[Info]: Clean mangle proxy iptables rules."
-    iptables_chains=`iptables-save -t nat | cut -d ' ' -f 1 | tr "\n" " "`
+    # iptables_chains=`iptables-save -t nat | cut -d ' ' -f 1 | tr "\n" " "`
+    # ${iptables_wait} -t mangle -D OUTPUT -j APP_TCP_AND_UDP_PROXY 2> /dev/null
+    # if eval "echo \"${iptables_chains}\" | grep -q \":APP_TCP_AND_UDP_PROXY \"" ; then
+    #     ${iptables_wait} -t mangle -F APP_TCP_AND_UDP_PROXY
+    #     ${iptables_wait} -t mangle -X APP_TCP_AND_UDP_PROXY
+    # fi
+    # if eval "echo \"${iptables_chains}\" | grep -q \":CLASH \"" ; then
+    #     ${iptables_wait} -t mangle -F CLASH
+    #     ${iptables_wait} -t mangle -X CLASH
+    # fi
+    # unset iptables_chains
     ${iptables_wait} -t mangle -F OUTPUT
-    if eval "echo \"${iptables_chains}\" | grep -q \":APP_TCP_AND_UDP_PROXY \"" ; then
-        ${iptables_wait} -t mangle -F APP_TCP_AND_UDP_PROXY
-        ${iptables_wait} -t mangle -X APP_TCP_AND_UDP_PROXY
-    fi
-    if eval "echo \"${iptables_chains}\" | grep -q \":CLASH \"" ; then
-        ${iptables_wait} -t mangle -F CLASH
-        ${iptables_wait} -t mangle -X CLASH
-    fi
-    unset iptables_chains
+    sleep 1
+    ${iptables_wait} -t mangle -F APP_TCP_AND_UDP_PROXY
+    ${iptables_wait} -t mangle -X APP_TCP_AND_UDP_PROXY
+    sleep 1
+    ${iptables_wait} -t mangle -F CLASH
+    ${iptables_wait} -t mangle -X CLASH
 }
 
 disable_proxy() {
