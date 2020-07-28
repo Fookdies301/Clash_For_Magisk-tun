@@ -1,0 +1,6 @@
+id=clash
+name=Clash tun For Magisk
+version=tun_clash_2020.06.27
+versionCode=20200710
+author=kalasutra
+description=使用clash tun内核
